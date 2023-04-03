@@ -210,11 +210,6 @@ def initialize_model_parallel(
             # Initialize model parallel group
             _MODEL_PARALLEL_GROUP = group
 
-    # Ensure all processes have completed parallel state initialization.
-    # Necessary to protect new_group calls from deadlock due to racing
-    # processes terminating early outside this function.
-    dist.barrier()
-
 
 # The pattern appearing in the initialization, where we loop over all
 # ranks in the global process group and re-compute the relevant groups
@@ -364,11 +359,26 @@ def get_pipeline_model_parallel_rank():
 
 
 def is_pipeline_first_stage():
-    """Return True if in the first pipeline model-parallel stage, False otherwise."""
+    """Return True if in the first pipeline model parallel stage, False otherwise."""
     return get_pipeline_model_parallel_rank() == 0
 
 
 def is_pipeline_last_stage():
-    """Return True if in the last pipeline model-parallel stage, False otherwise."""
+    """Return True if in the last pipeline model parallel stage, False otherwise."""
     return get_pipeline_model_parallel_rank() == (
         get_pipeline_model_parallel_world_size() - 1)
+
+
+def destroy_model_parallel():
+    """Set the groups to none."""
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    _TENSOR_MODEL_PARALLEL_GROUP = None
+
+    global _PIPELINE_MODEL_PARALLEL_GROUP
+    _PIPELINE_MODEL_PARALLEL_GROUP = None
+
+    global _DATA_PARALLEL_GROUP
+    _DATA_PARALLEL_GROUP = None
+
+    global _MODEL_PARALLEL_GROUP
+    _MODEL_PARALLEL_GROUP = None
