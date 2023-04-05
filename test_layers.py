@@ -30,7 +30,7 @@ def test(batch_size,
     linear = ss.ParallelLinear(input_size, output_size)
     x = torch.randn(size=(batch_size, input_size), requires_grad=True)
     dist.broadcast(tensor=x, 
-                   src=ps._TENSOR_GLOBAL_RANKS[0], 
+                   src=ps.get_tensor_parallel_src_rank(), 
                    group=group
                    )
     output = linear(x)
@@ -80,7 +80,7 @@ def test(batch_size,
     )
 
     # Writing output, uncomment for testing
-    # out_file = './starscream/'+str(rank)+'.out'
+    # out_file = './starscream/log/'+str(rank)+'.out'
     # try:
     #     os.remove(out_file)
     # except OSError:

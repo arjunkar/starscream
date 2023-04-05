@@ -358,6 +358,34 @@ def get_pipeline_model_parallel_rank():
     return dist.get_rank(group=get_pipeline_model_parallel_group())
 
 
+def get_tensor_parallel_src_rank():
+    """Return first rank in tensor model parallel group."""
+    assert _TENSOR_GLOBAL_RANKS is not None, \
+        'Tensor model parallel group is not initialized.'
+    return _TENSOR_GLOBAL_RANKS[0]
+
+
+def get_data_parallel_src_rank():
+    """Return first rank in data parallel group."""
+    assert _DATA_PARALLEL_GLOBAL_RANKS is not None, \
+        'Data parallel group is not initialized.'
+    return _DATA_PARALLEL_GLOBAL_RANKS[0]
+
+
+def get_pipeline_model_parallel_first_rank():
+    """Return first rank in pipeline model parallel group."""
+    assert _PIPELINE_GLOBAL_RANKS is not None, \
+        'Pipeline model parallel group is not initialized.'
+    return _PIPELINE_GLOBAL_RANKS[0]
+
+
+def get_pipeline_model_parallel_last_rank():
+    """Return last rank in pipeline model parallel group."""
+    assert _PIPELINE_GLOBAL_RANKS is not None, \
+        'Pipeline model parallel group is not initialized.'
+    return _PIPELINE_GLOBAL_RANKS[-1]
+
+
 def is_pipeline_first_stage():
     """Return True if in the first pipeline model parallel stage, False otherwise."""
     return get_pipeline_model_parallel_rank() == 0

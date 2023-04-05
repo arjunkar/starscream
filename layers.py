@@ -11,6 +11,7 @@ from torch.autograd.function import FunctionCtx
 from torch import nn
 import torch.distributed as dist
 import parallel_state as ps
+from typing import Tuple
 
 
 class ParallelLinearFunctional(torch.autograd.Function):
@@ -33,7 +34,7 @@ class ParallelLinearFunctional(torch.autograd.Function):
     
     @staticmethod
     def backward(ctx: FunctionCtx,
-                 grad_output: Tensor) -> tuple[Tensor]:
+                 grad_output: Tensor) -> Tuple[Tensor]:
         # Expects [batch_dim, num_features] input.  Broadcasting not supported.
         input, weight = ctx.saved_tensors
 
