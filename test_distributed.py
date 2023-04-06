@@ -11,13 +11,11 @@ import torch.multiprocessing as mp
 from distributed import DistributedDataParallel as DDP
 import parallel_state as ps
 
-def test(batch_size,
+def test(micro_batch_size,
          input_size,
          output_size,
          tensor_model_parallel_size,
          pipeline_model_parallel_size):
-
-    rank = dist.get_rank()
 
     ps.initialize_model_parallel(
         tensor_model_parallel_size,
@@ -28,18 +26,49 @@ def test(batch_size,
     
     linear = nn.Linear(input_size, output_size)
     linear_ddp = DDP(linear)
-    x = torch.randn(size=(batch_size, input_size), requires_grad=True)
+    x = torch.randn(size=(micro_batch_size, input_size), requires_grad=True)
     
     linear_ddp.broadcast_params()
 
-    # test broadcast_params here
+    # test broadcast_params
+    all_weight = [torch.empty_like(linear.weight.data) for _ in range(world_size)]
+    all_bias = [torch.empty_like(linear.bias.data) for _ in range(world_size)]
+    dist.all_gather(tensor_list=all_weight,
+                    tensor=linear.weight.data,
+                    group=group)
+    dist.all_gather(tensor_list=all_bias,
+                    tensor=linear.bias.data,
+                    group=group)
+    for i in range(world_size-1):
+        assert(
+            torch.allclose(all_weight[i], all_weight[i+1])
+        )
+        assert(
+            torch.allclose(all_bias[i], all_bias[i+1])
+        )
 
     output = linear_ddp(x)
-    output.sum().backward()
+    (output.sum() / micro_batch_size).backward()
 
     linear_ddp.allreduce_gradients()
 
-    # test allreduce_gradients here
+    # test allreduce_gradients
+    single_weight = linear_ddp.module.weight.data.clone().detach().requires_grad_(True)
+    single_bias = linear_ddp.module.bias.data.clone().detach().requires_grad_(True)
+    input_list = [torch.empty_like(x) for _ in range(world_size)]
+    dist.all_gather(input_list, x, group=group)
+    total_input = torch.cat(input_list, dim=0)
+    output = torch.matmul(total_input, single_weight.t()) + single_bias
+    (output.sum() / (world_size * micro_batch_size)).backward()
+
+    assert(
+        torch.allclose(linear_ddp.module.weight.grad,
+                       single_weight.grad)
+    )
+    assert(
+        torch.allclose(linear_ddp.module.bias.grad,
+                       single_bias.grad)
+    )
 
     ps.destroy_model_parallel()
     dist.barrier()
@@ -51,12 +80,12 @@ def init_process(rank, size, backend='gloo'):
     os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group(backend, rank=rank, world_size=size)
     
-    batch_size = 3
+    micro_batch_size = 3
     input_size = 5
     output_size = 12
     P = 2
     for T in range(1, 4):
-        test(batch_size,
+        test(micro_batch_size,
             input_size,
             output_size,
             T, P)
