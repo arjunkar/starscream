@@ -31,6 +31,10 @@ class Schedule(ABC):
         assert ps.get_pipeline_model_parallel_world_size() > 1, \
             "Pipeline model parallel size must be at least 2 to use schedules."
 
+        self.local_rank = ps.get_pipeline_model_parallel_rank()
+        self.group = ps.get_pipeline_model_parallel_group()
+        self.world_size = ps.get_pipeline_model_parallel_world_size()
+
         self.is_first = ps.is_pipeline_first_stage()
         self.is_last = ps.is_pipeline_last_stage()
         self.first = ps.get_pipeline_model_parallel_first_rank()
@@ -132,7 +136,9 @@ class Schedule(ABC):
         # Incoming communication handling
         if self.is_last:
             ans = self.input_store[-num]
-            out = self.loss_fn(self.output_store[num], ans)
+            micro_batch_size = ans.size()[0]
+            # Square the number of microbatches in denominator
+            out = self.loss_fn(self.output_store[num], ans) / (self.num_micro_batches**2 * micro_batch_size)
             out_grads = None
         else:
             # Receive gradients from next stage
@@ -176,6 +182,7 @@ class GPipe(Schedule):
         super().__init__(model, data_loader, loss_fn, num_micro_batches)
 
     def train_step(self):
+        # See Figure 3 in arXiv:2104.04473
         fwd_schedule = torch.arange(self.num_micro_batches) + 1
         bwd_schedule = -torch.arange(self.num_micro_batches) - 1
         queue = deque(
@@ -188,7 +195,51 @@ class GPipe(Schedule):
                 self.fwd_step(job)
             else:
                 self.bwd_step(-job)
+        # Ensure all processes have finished working
+        dist.barrier()
 
 
+# Preliminary, suspected deadlock
 class PipeDream(Schedule):
-    pass # Implement PipeDream
+    def __init__(self, 
+                 model: ModelType,
+                 data_loader,
+                 loss_fn,
+                 num_micro_batches: int
+                 ) -> None:
+        super().__init__(model, data_loader, loss_fn, num_micro_batches)
+
+    def train_step(self):
+        num_mb = self.num_micro_batches
+        rank = self.local_rank
+        world = self.world_size
+        # See Figure 4 in arXiv:2104.04473
+        if self.is_last:
+            fwds = list(range(1, num_mb+1))
+            bwds = list(range(-1, -num_mb-1, -1))
+            sched = fwds + bwds
+            sched[::2] = fwds
+            sched[1::2] = bwds
+            queue = deque(sched)
+        else:
+            warmup_schedule = [i for i in range(1, world+1)] + [-j for j in range(1, rank+2)]
+            steady_fwds = [i for i in range(world+1, num_mb+1)]
+            steady_bwds = [-(val-(world-1)+rank) for val in steady_fwds]
+            steady_schedule = steady_fwds + steady_bwds
+            # Steady state of 1 forward, 1 backward
+            steady_schedule[::2] = steady_fwds
+            steady_schedule[1::2] = steady_bwds
+            cooldown_schedule = [-j for j in range(-steady_bwds[-1]+1, num_mb+1)]
+            queue = deque(
+                warmup_schedule + steady_schedule + cooldown_schedule
+            )
+        # Perform parallel pipeline work
+        while queue:
+            job = queue.popleft()
+            print("Rank ", dist.get_rank(), "processing job ", job)
+            if job > 0:
+                self.fwd_step(job)
+            else:
+                self.bwd_step(-job)
+        # Ensure all processes have finished working
+        dist.barrier()
