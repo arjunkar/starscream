@@ -14,6 +14,10 @@ import parallel_state as ps
 class DistributedDataParallel(nn.Module):
     def __init__(self, module: nn.Module) -> None:
         super().__init__()
+
+        assert ps.model_parallel_is_initialized(), \
+            "Parallel state is not initialized."
+        
         self.module = module
 
     def forward(self, *inputs, **kwargs):
