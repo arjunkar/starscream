@@ -45,13 +45,13 @@ def test(t, p):
     bsz = 3
     isz = 2
     num_classes = isz
-    num_mb = 4
+    num_mb = 8
 
     model = nn.Linear(num_classes, num_classes)
     loader = FakeLoader(bsz, isz, num_classes)
     loss = nn.CrossEntropyLoss()
 
-    sched = GPipe(model, loader, loss, num_mb)
+    sched = PipeDream(model, loader, loss, num_mb)
     sched.train_step()
 
     # Broadcast totaled input over microbatches from first stage
@@ -138,14 +138,14 @@ def init_process(rank, size, backend='gloo'):
     os.environ['MASTER_ADDR'] = '127.0.0.1'
     os.environ['MASTER_PORT'] = '29500'
     dist.init_process_group(backend, rank=rank, world_size=size)
-    t = 2
+    t = 1
     p = 4
     test(t, p)
 
 
 if __name__ == "__main__":
 
-    world_size = 16
+    world_size = 4
     
     processes = []
     mp.set_start_method("spawn")

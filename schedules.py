@@ -52,9 +52,12 @@ class Schedule(ABC):
         self.send_reqs = {}
         self.recv_reqs = {}
 
+        self.init_comm()
+
+    def init_comm(self):
         # First pipeline stage sends classes to last
         if self.is_first:
-            for num in range(1, num_micro_batches+1):
+            for num in range(1, self.num_micro_batches+1):
                 self.input_store[num], ans = self.data_loader.__next__()
                 shape = torch.tensor(list(ans.size()))
                 dist.send(
@@ -71,7 +74,7 @@ class Schedule(ABC):
             
         # Last pipeline stage receives classes from first
         if self.is_last:
-            for num in range(1, num_micro_batches+1):
+            for num in range(1, self.num_micro_batches+1):
                 # answer shape should be a vector of classes
                 shape = torch.tensor([0])
                 dist.recv(
@@ -90,6 +93,7 @@ class Schedule(ABC):
 
     def fwd_step(self, num: int):
         # Incoming communication handling
+        # print("Process ", dist.get_rank(), "incoming fwd", num)
         if not self.is_first:
             shape = torch.tensor([0, 0])
             shape_req = dist.irecv(
@@ -108,13 +112,30 @@ class Schedule(ABC):
             self.recv_reqs[num].wait()
 
         # Forward pass
+        # print("Process ", dist.get_rank(), "forwarding ", num)
         input = self.input_store[num].requires_grad_(True)
         self.output_store[num] = self.model(input)
         
         # Outgoing communication handling
+        # print("Process ", dist.get_rank(), "outgoing fwd", num)
         if not self.is_last:
             # Pre-allocate for backward step
             self.input_store[-num] = torch.empty_like(self.output_store[num])
+            # Buffer irecv request.
+            # The placement of this irecv in the forward pass rather than
+            # at the start of the backward pass is critical to prevent deadlock
+            # in the 1F1B pipeline.
+            # Without it, the second forward pass at the penultimate stage can deadlock
+            # with the first backward pass of the final stage, as both attempt
+            # to wait() on isend requests without any irecv requests in the 
+            # communication queue.
+            # Placing it here ensures that there is an available irecv for the
+            # final stage to match and continue processing.
+            self.recv_reqs[-num] = dist.irecv(
+                tensor=self.input_store[-num],
+                src=self.next,
+                tag=num
+            )
             shape_req = dist.isend(
                 tensor=torch.tensor(
                     list(
@@ -134,6 +155,7 @@ class Schedule(ABC):
 
     def bwd_step(self, num: int):
         # Incoming communication handling
+        # print("Process ", dist.get_rank(), "incoming bwd", num)
         if self.is_last:
             ans = self.input_store[-num]
             micro_batch_size = ans.size()[0]
@@ -141,23 +163,19 @@ class Schedule(ABC):
             out = self.loss_fn(self.output_store[num], ans) / (self.num_micro_batches**2 * micro_batch_size)
             out_grads = None
         else:
-            # Receive gradients from next stage
-            self.recv_reqs[-num] = dist.irecv(
-                # Pre-allocated during forward step
-                tensor=self.input_store[-num],
-                src=self.next,
-                tag=num
-            )
-            # Ensure downstream operations in pipeline
-            # are all completed
+            # Receive gradients from next stage.
+            # Ensures downstream operations in pipeline
+            # are all completed.
             self.recv_reqs[-num].wait()
             out = self.output_store[num]
             out_grads = self.input_store[-num]
         
         # Backward pass
+        # ("Process ", dist.get_rank(), "backwarding ", num)
         out.backward(gradient=out_grads)
 
         # Outgoing communication handling
+        # print("Process ", dist.get_rank(), "outgoing bwd ", num)
         if not self.is_first:
             self.output_store[-num] = self.input_store[num].grad.detach()
             self.send_reqs[-num] = dist.isend(
@@ -199,7 +217,6 @@ class GPipe(Schedule):
         dist.barrier()
 
 
-# Preliminary, suspected deadlock
 class PipeDream(Schedule):
     def __init__(self, 
                  model: ModelType,
@@ -208,6 +225,9 @@ class PipeDream(Schedule):
                  num_micro_batches: int
                  ) -> None:
         super().__init__(model, data_loader, loss_fn, num_micro_batches)
+
+        assert self.world_size < self.num_micro_batches, \
+            "PipeDream requires pipeline parallel size < number of microbatches."
 
     def train_step(self):
         num_mb = self.num_micro_batches
@@ -236,10 +256,22 @@ class PipeDream(Schedule):
         # Perform parallel pipeline work
         while queue:
             job = queue.popleft()
-            print("Rank ", dist.get_rank(), "processing job ", job)
             if job > 0:
                 self.fwd_step(job)
             else:
                 self.bwd_step(-job)
         # Ensure all processes have finished working
         dist.barrier()
+
+
+class Interleaved(Schedule):
+    def __init__(self, 
+                 model: ModelType,
+                 data_loader,
+                 loss_fn,
+                 num_micro_batches: int
+                 ) -> None:
+        super().__init__(model, data_loader, loss_fn, num_micro_batches)
+
+    def train_step(self):
+        pass # Implement interleaved 1F1B
